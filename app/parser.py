@@ -1,7 +1,7 @@
 import os
 import re
 import tempfile
-from typing import Any
+from typing import Optional
 
 import httpx
 from odf.opendocument import load
@@ -17,22 +17,32 @@ PRODUIT_RE = re.compile(r"^\d{2}\.\d{2}\.\d{4}$")
 def get_cell_text(cell: TableCell) -> str:
     texts = []
     for p in cell.getElementsByType(P):
-        if p.firstChild:
-            texts.append(str(p.firstChild.data))
+        parts = []
+        for node in p.childNodes:
+            if hasattr(node, "data") and node.data:
+                parts.append(str(node.data))
+        txt = "".join(parts).strip()
+        if txt:
+            texts.append(txt)
     return " ".join(texts).strip()
 
 
-def normalize_number(value: str):
+def normalize_number(value: Optional[str]) -> Optional[float]:
     if value is None:
         return None
+
     value = str(value).strip()
     if value == "":
         return None
 
-    # Nettoyage format français : "1 234,56" -> 1234.56
-    value = value.replace("\xa0", " ").replace(" ", "").replace(",", ".")
+    # Nettoyage format FR : "1 234,56" -> 1234.56
+    value = value.replace("\xa0", " ")
+    value = value.replace(" ", "")
+    value = value.replace(",", ".")
+
+    # Garde seulement un format numérique simple
     try:
-        return float(value)
+        return round(float(value), 2)
     except ValueError:
         return None
 
@@ -40,6 +50,7 @@ def normalize_number(value: str):
 def classify_code(code: str) -> str:
     if not code:
         return "other"
+
     code = code.strip()
     if LOT_RE.match(code):
         return "lot"
@@ -73,6 +84,7 @@ def extract_rows_from_result_sheet(file_path: str):
             cell_text = get_cell_text(cell)
             for _ in range(repeat):
                 row_values.append(cell_text)
+
         all_rows.append({
             "row_index": row_index,
             "values": row_values
@@ -83,11 +95,31 @@ def extract_rows_from_result_sheet(file_path: str):
 
 def find_header_row(rows):
     for row in rows:
-        vals = [v.strip() for v in row["values"]]
+        vals = [str(v).strip() for v in row["values"]]
         joined = " | ".join(vals).lower()
-        if "code" in joined and "désignation" in joined and "quantité" in joined:
+
+        # Tolérance sur les accents / variantes
+        if "code" in joined and ("désignation" in joined or "designation" in joined) and "quantité" in joined:
             return row["row_index"]
+
     raise ValueError("Ligne d'en-tête introuvable dans la feuille 'Result'.")
+
+
+def get_last_numeric_value(values) -> Optional[float]:
+    """
+    Récupère la dernière valeur numérique non vide de la ligne.
+    Très utile pour les lignes TOTAL HT où la valeur n'est pas forcément dans la colonne fixe.
+    """
+    numeric_values = []
+    for v in values:
+        n = normalize_number(v)
+        if n is not None:
+            numeric_values.append(n)
+
+    if not numeric_values:
+        return None
+
+    return numeric_values[-1]
 
 
 def parse_rows(rows, header_index):
@@ -105,34 +137,38 @@ def parse_rows(rows, header_index):
         if len(values) < 6:
             values = values + [""] * (6 - len(values))
 
-        code = values[0].strip()
-        designation = values[1].strip()
-        unite = values[2].strip() or None
-        quantite = normalize_number(values[3])
-        pu = normalize_number(values[4])
-        total = normalize_number(values[5])
+        code = values[0].strip() if len(values) > 0 else ""
+        designation = values[1].strip() if len(values) > 1 else ""
+        unite = values[2].strip() if len(values) > 2 else ""
+        quantite = normalize_number(values[3] if len(values) > 3 else "")
+        pu = normalize_number(values[4] if len(values) > 4 else "")
+        total = normalize_number(values[5] if len(values) > 5 else "")
 
-        joined_text = " ".join(values).strip().upper()
+        joined_text = " ".join([str(v) for v in values]).strip().upper()
 
         if not joined_text:
             continue
 
+        # Ignore TVA
+        if "TVA" in joined_text:
+            continue
+
+        # Lignes TOTAL
         if "TOTAL HT" in joined_text or joined_text.startswith("TOTAL"):
+            total_value = get_last_numeric_value(values)
+
             parsed_rows.append({
                 "row_index": row["row_index"],
                 "code": code or None,
                 "type_ligne": "total",
                 "code_lot": current_lot_code,
-                "designation": designation or "TOTAL HT",
-                "unite": unite,
-                "quantite": quantite,
-                "pu": pu,
-                "total": total,
+                "designation": "TOTAL HT",
+                "unite": None,
+                "quantite": None,
+                "pu": None,
+                "total": total_value,
                 "commentaire": None
             })
-            continue
-
-        if "TVA" in joined_text:
             continue
 
         type_ligne = classify_code(code)
@@ -140,6 +176,7 @@ def parse_rows(rows, header_index):
         if type_ligne == "lot":
             current_lot_code = code
             current_lot_name = designation
+
             parsed_rows.append({
                 "row_index": row["row_index"],
                 "code": code,
@@ -171,15 +208,21 @@ def parse_rows(rows, header_index):
 
         if type_ligne == "produit":
             code_lot = code[:2]
+
             if not current_lot_code:
                 warnings.append(f"Ligne produit sans lot courant détectée à la ligne {row['row_index']}")
+
+            # Recalcul du total si absent
+            if total is None and quantite is not None and pu is not None:
+                total = round(quantite * pu, 2)
+
             parsed_rows.append({
                 "row_index": row["row_index"],
                 "code": code,
                 "type_ligne": "produit",
                 "code_lot": code_lot,
                 "designation": designation,
-                "unite": unite,
+                "unite": unite or None,
                 "quantite": quantite,
                 "pu": pu,
                 "total": total,
@@ -195,7 +238,9 @@ def parse_rows(rows, header_index):
 
 def aggregate_lots(parsed_rows):
     lots = {}
+    warnings = []
 
+    # Initialisation des lots
     for row in parsed_rows:
         if row["type_ligne"] == "lot":
             code_lot = row["code_lot"]
@@ -208,6 +253,7 @@ def aggregate_lots(parsed_rows):
                 "delta_total": None
             }
 
+    # Agrégation
     for row in parsed_rows:
         code_lot = row.get("code_lot")
         if not code_lot or code_lot not in lots:
@@ -217,21 +263,33 @@ def aggregate_lots(parsed_rows):
             lots[code_lot]["nb_lignes_produit"] += 1
             lots[code_lot]["total_calcule"] += row["total"] or 0.0
 
-        if row["type_ligne"] == "total":
+        # On garde UNIQUEMENT le premier TOTAL HT rencontré
+        if row["type_ligne"] == "total" and lots[code_lot]["total_importe"] is None:
             lots[code_lot]["total_importe"] = row["total"]
 
+    # Finalisation + warnings
     for code_lot, lot in lots.items():
+        lot["total_calcule"] = round(lot["total_calcule"], 2)
+
         if lot["total_importe"] is not None:
+            lot["total_importe"] = round(lot["total_importe"], 2)
             lot["delta_total"] = round(lot["total_calcule"] - lot["total_importe"], 2)
         else:
             lot["delta_total"] = None
+            warnings.append(f"Lot {code_lot} : total importé introuvable.")
 
-        lot["total_calcule"] = round(lot["total_calcule"], 2)
+        if lot["nb_lignes_produit"] == 0:
+            warnings.append(f"Lot {code_lot} : aucun produit détecté.")
 
-    return list(lots.values())
+    return list(lots.values()), warnings
 
 
-def parse_ods_from_url(file_url: str, chantier_id: str = None, metre_type: str = None, version_index: int = None):
+def parse_ods_from_url(
+    file_url: str,
+    chantier_id: Optional[str] = None,
+    metre_type: Optional[str] = None,
+    version_index: Optional[int] = None
+):
     if not file_url:
         return {
             "status": "error",
@@ -255,10 +313,12 @@ def parse_ods_from_url(file_url: str, chantier_id: str = None, metre_type: str =
 
         rows = extract_rows_from_result_sheet(tmp_path)
         header_index = find_header_row(rows)
-        parsed_rows, warnings = parse_rows(rows, header_index)
-        lots = aggregate_lots(parsed_rows)
+        parsed_rows, parse_warnings = parse_rows(rows, header_index)
+        lots, aggregate_warnings = aggregate_lots(parsed_rows)
 
+        warnings = parse_warnings + aggregate_warnings
         errors = []
+
         if not lots:
             errors.append("Aucun lot exploitable détecté.")
 
