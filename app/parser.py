@@ -322,6 +322,36 @@ def aggregate_lots(parsed_rows):
     return list(lots.values()), warnings
 
 
+def build_structured_errors(lots, suspect_rows):
+    errors = []
+
+    if not lots:
+        errors.append({
+            "type": "no_lot_detected",
+            "message": "Aucun lot exploitable détecté"
+        })
+
+    for s in suspect_rows:
+        if s["reason"] == "code_absent_with_quantity":
+            errors.append({
+                "type": "code_absent_with_quantity",
+                "row_index": s["row_index"],
+                "message": "Une ligne contient une quantité sans code produit"
+            })
+
+    # Déduplication simple
+    unique_errors = []
+    seen = set()
+
+    for err in errors:
+        key = (err.get("type"), err.get("row_index"), err.get("message"))
+        if key not in seen:
+            seen.add(key)
+            unique_errors.append(err)
+
+    return unique_errors
+
+
 def parse_ods_from_url(
     file_url: str,
     chantier_id: Optional[str] = None,
@@ -331,7 +361,12 @@ def parse_ods_from_url(
     if not file_url:
         return {
             "status": "error",
-            "errors": ["file_url manquant"],
+            "errors": [
+                {
+                    "type": "missing_file_url",
+                    "message": "file_url manquant"
+                }
+            ],
             "warnings": [],
             "suspect_rows": [],
             "rows": [],
@@ -356,10 +391,7 @@ def parse_ods_from_url(
         lots, aggregate_warnings = aggregate_lots(parsed_rows)
 
         warnings = parse_warnings + aggregate_warnings
-        errors = []
-
-        if not lots:
-            errors.append("Aucun lot exploitable détecté.")
+        errors = build_structured_errors(lots, suspect_rows)
 
         return {
             "status": "success" if not errors else "error",
@@ -383,7 +415,12 @@ def parse_ods_from_url(
             "chantier_id": chantier_id,
             "type": metre_type,
             "version_index": version_index,
-            "errors": [str(e)],
+            "errors": [
+                {
+                    "type": "parser_exception",
+                    "message": str(e)
+                }
+            ],
             "warnings": [],
             "suspect_rows": [],
             "rows": [],
