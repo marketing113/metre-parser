@@ -35,7 +35,6 @@ def normalize_number(value: Optional[str]) -> Optional[float]:
     if value == "":
         return None
 
-    # Nettoyage format FR : "1 234,56" -> 1234.56
     value = value.replace("\xa0", " ")
     value = value.replace(" ", "")
     value = value.replace(",", ".")
@@ -106,7 +105,7 @@ def find_header_row(rows):
 def get_last_numeric_value(values) -> Optional[float]:
     """
     Récupère la dernière valeur numérique non vide de la ligne.
-    Très utile pour les lignes TOTAL HT où la valeur n'est pas forcément dans la colonne fixe.
+    Utile pour les lignes TOTAL HT où la valeur n'est pas forcément dans la colonne fixe.
     """
     numeric_values = []
     for v in values:
@@ -132,8 +131,8 @@ def parse_rows(rows, header_index):
             continue
 
         values = row["values"]
-        if len(values) < 6:
-            values = values + [""] * (6 - len(values))
+        if len(values) < 8:
+            values = values + [""] * (8 - len(values))
 
         code = values[0].strip() if len(values) > 0 else ""
         designation = values[1].strip() if len(values) > 1 else ""
@@ -141,6 +140,7 @@ def parse_rows(rows, header_index):
         quantite = normalize_number(values[3] if len(values) > 3 else "")
         pu = normalize_number(values[4] if len(values) > 4 else "")
         total = normalize_number(values[5] if len(values) > 5 else "")
+        non_compris = str(values[7]).strip().upper() == "X" if len(values) > 7 else False
 
         joined_text = " ".join([str(v) for v in values]).strip().upper()
 
@@ -165,6 +165,7 @@ def parse_rows(rows, header_index):
                 "quantite": None,
                 "pu": None,
                 "total": total_value,
+                "non_compris": False,
                 "commentaire": None
             })
             continue
@@ -201,6 +202,7 @@ def parse_rows(rows, header_index):
                 "quantite": None,
                 "pu": None,
                 "total": None,
+                "non_compris": False,
                 "commentaire": None
             })
             continue
@@ -216,6 +218,7 @@ def parse_rows(rows, header_index):
                 "quantite": None,
                 "pu": None,
                 "total": None,
+                "non_compris": False,
                 "commentaire": None
             })
             continue
@@ -258,6 +261,7 @@ def parse_rows(rows, header_index):
                 "quantite": quantite,
                 "pu": pu,
                 "total": total,
+                "non_compris": non_compris,
                 "commentaire": None
             })
             continue
@@ -292,7 +296,9 @@ def aggregate_lots(parsed_rows):
 
         if row["type_ligne"] == "produit":
             lots[code_lot]["nb_lignes_produit"] += 1
-            lots[code_lot]["total_calcule"] += row["total"] or 0.0
+
+            if not row.get("non_compris", False):
+                lots[code_lot]["total_calcule"] += row["total"] or 0.0
 
         # On garde UNIQUEMENT le premier TOTAL HT rencontré
         if row["type_ligne"] == "total" and lots[code_lot]["total_importe"] is None:
