@@ -120,23 +120,12 @@ def get_last_numeric_value(values) -> Optional[float]:
     return numeric_values[-1]
 
 
-def has_extra_data(values, expected_len=6) -> bool:
-    if len(values) <= expected_len:
-        return False
-
-    for v in values[expected_len:]:
-        if str(v).strip() != "":
-            return True
-    return False
-
-
 def parse_rows(rows, header_index):
     parsed_rows = []
     warnings = []
     suspect_rows = []
 
     current_lot_code = None
-    current_lot_name = None
 
     for row in rows:
         if row["row_index"] <= header_index:
@@ -157,14 +146,6 @@ def parse_rows(rows, header_index):
 
         if not joined_text:
             continue
-
-        # Détection de données hors structure attendue
-        if has_extra_data(values):
-            suspect_rows.append({
-                "row_index": row["row_index"],
-                "raw_values": values,
-                "reason": "extra_data_outside_expected_columns"
-            })
 
         # Ignore TVA
         if "TVA" in joined_text:
@@ -188,14 +169,12 @@ def parse_rows(rows, header_index):
             })
             continue
 
-        # Ligne sans code mais avec données métier
-        if not code and (
-            designation or unite or quantite is not None or pu is not None or total is not None
-        ):
+        # Ligne suspecte : quantité présente mais aucun code
+        if not code and quantite is not None:
             suspect_rows.append({
                 "row_index": row["row_index"],
                 "raw_values": values,
-                "reason": "code_absent_but_data_present"
+                "reason": "code_absent_with_quantity"
             })
             continue
 
@@ -211,7 +190,6 @@ def parse_rows(rows, header_index):
 
         if type_ligne == "lot":
             current_lot_code = code
-            current_lot_name = designation
 
             parsed_rows.append({
                 "row_index": row["row_index"],
