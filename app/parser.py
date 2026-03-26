@@ -181,7 +181,7 @@ def parse_rows(rows, header_index):
 
         type_ligne = classify_code(code)
 
-        if code and type_ligne == "other":
+          if code and type_ligne == "other" and quantite is not None:
             suspect_rows.append({
                 "row_index": row["row_index"],
                 "raw_values": values,
