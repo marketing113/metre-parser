@@ -40,7 +40,6 @@ def normalize_number(value: Optional[str]) -> Optional[float]:
     value = value.replace(" ", "")
     value = value.replace(",", ".")
 
-    # Garde seulement un format numérique simple
     try:
         return round(float(value), 2)
     except ValueError:
@@ -98,7 +97,6 @@ def find_header_row(rows):
         vals = [str(v).strip() for v in row["values"]]
         joined = " | ".join(vals).lower()
 
-        # Tolérance sur les accents / variantes
         if "code" in joined and ("désignation" in joined or "designation" in joined) and "quantité" in joined:
             return row["row_index"]
 
@@ -122,9 +120,20 @@ def get_last_numeric_value(values) -> Optional[float]:
     return numeric_values[-1]
 
 
+def has_extra_data(values, expected_len=6) -> bool:
+    if len(values) <= expected_len:
+        return False
+
+    for v in values[expected_len:]:
+        if str(v).strip() != "":
+            return True
+    return False
+
+
 def parse_rows(rows, header_index):
     parsed_rows = []
     warnings = []
+    suspect_rows = []
 
     current_lot_code = None
     current_lot_name = None
@@ -149,6 +158,14 @@ def parse_rows(rows, header_index):
         if not joined_text:
             continue
 
+        # Détection de données hors structure attendue
+        if has_extra_data(values):
+            suspect_rows.append({
+                "row_index": row["row_index"],
+                "raw_values": values,
+                "reason": "extra_data_outside_expected_columns"
+            })
+
         # Ignore TVA
         if "TVA" in joined_text:
             continue
@@ -171,7 +188,26 @@ def parse_rows(rows, header_index):
             })
             continue
 
+        # Ligne sans code mais avec données métier
+        if not code and (
+            designation or unite or quantite is not None or pu is not None or total is not None
+        ):
+            suspect_rows.append({
+                "row_index": row["row_index"],
+                "raw_values": values,
+                "reason": "code_absent_but_data_present"
+            })
+            continue
+
         type_ligne = classify_code(code)
+
+        if code and type_ligne == "other":
+            suspect_rows.append({
+                "row_index": row["row_index"],
+                "raw_values": values,
+                "reason": "unknown_code_format"
+            })
+            continue
 
         if type_ligne == "lot":
             current_lot_code = code
@@ -211,10 +247,28 @@ def parse_rows(rows, header_index):
 
             if not current_lot_code:
                 warnings.append(f"Ligne produit sans lot courant détectée à la ligne {row['row_index']}")
+                suspect_rows.append({
+                    "row_index": row["row_index"],
+                    "raw_values": values,
+                    "reason": "produit_without_current_lot"
+                })
 
-            # Recalcul du total si absent
-            if total is None and quantite is not None and pu is not None:
-                total = round(quantite * pu, 2)
+            if quantite is None and pu is None and total is None:
+                suspect_rows.append({
+                    "row_index": row["row_index"],
+                    "raw_values": values,
+                    "reason": "produit_missing_numeric_values"
+                })
+
+            if total is None:
+                if quantite is not None and pu is not None:
+                    total = round(quantite * pu, 2)
+                else:
+                    suspect_rows.append({
+                        "row_index": row["row_index"],
+                        "raw_values": values,
+                        "reason": "produit_total_missing_and_cannot_recalculate"
+                    })
 
             parsed_rows.append({
                 "row_index": row["row_index"],
@@ -230,10 +284,9 @@ def parse_rows(rows, header_index):
             })
             continue
 
-        # Lignes parasites ignorées
         continue
 
-    return parsed_rows, warnings
+    return parsed_rows, warnings, suspect_rows
 
 
 def aggregate_lots(parsed_rows):
@@ -295,6 +348,7 @@ def parse_ods_from_url(
             "status": "error",
             "errors": ["file_url manquant"],
             "warnings": [],
+            "suspect_rows": [],
             "rows": [],
             "lots": []
         }
@@ -313,7 +367,7 @@ def parse_ods_from_url(
 
         rows = extract_rows_from_result_sheet(tmp_path)
         header_index = find_header_row(rows)
-        parsed_rows, parse_warnings = parse_rows(rows, header_index)
+        parsed_rows, parse_warnings, suspect_rows = parse_rows(rows, header_index)
         lots, aggregate_warnings = aggregate_lots(parsed_rows)
 
         warnings = parse_warnings + aggregate_warnings
@@ -331,6 +385,7 @@ def parse_ods_from_url(
             "version_index": version_index,
             "errors": errors,
             "warnings": warnings,
+            "suspect_rows": suspect_rows,
             "rows": parsed_rows,
             "lots": lots
         }
@@ -345,6 +400,7 @@ def parse_ods_from_url(
             "version_index": version_index,
             "errors": [str(e)],
             "warnings": [],
+            "suspect_rows": [],
             "rows": [],
             "lots": []
         }
