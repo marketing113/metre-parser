@@ -125,6 +125,7 @@ def parse_rows(rows, header_index):
     suspect_rows = []
 
     current_lot_code = None
+    current_lot_name = None
 
     for row in rows:
         if row["row_index"] <= header_index:
@@ -160,6 +161,7 @@ def parse_rows(rows, header_index):
                 "code": code or None,
                 "type_ligne": "total",
                 "code_lot": current_lot_code,
+                "nom_lot": current_lot_name,
                 "designation": "TOTAL HT",
                 "unite": None,
                 "quantite": None,
@@ -174,6 +176,8 @@ def parse_rows(rows, header_index):
         if not code and quantite is not None:
             suspect_rows.append({
                 "row_index": row["row_index"],
+                "code_lot": current_lot_code,
+                "nom_lot": current_lot_name,
                 "raw_values": values,
                 "reason": "code_absent_with_quantity"
             })
@@ -185,6 +189,8 @@ def parse_rows(rows, header_index):
         if code and type_ligne == "other" and quantite is not None:
             suspect_rows.append({
                 "row_index": row["row_index"],
+                "code_lot": current_lot_code,
+                "nom_lot": current_lot_name,
                 "raw_values": values,
                 "reason": "unknown_code_format"
             })
@@ -192,12 +198,14 @@ def parse_rows(rows, header_index):
 
         if type_ligne == "lot":
             current_lot_code = code
+            current_lot_name = designation or None
 
             parsed_rows.append({
                 "row_index": row["row_index"],
                 "code": code,
                 "type_ligne": "lot",
                 "code_lot": code,
+                "nom_lot": current_lot_name,
                 "designation": designation,
                 "unite": None,
                 "quantite": None,
@@ -214,6 +222,7 @@ def parse_rows(rows, header_index):
                 "code": code,
                 "type_ligne": "sous_lot",
                 "code_lot": current_lot_code,
+                "nom_lot": current_lot_name,
                 "designation": designation,
                 "unite": None,
                 "quantite": None,
@@ -231,6 +240,8 @@ def parse_rows(rows, header_index):
                 warnings.append(f"Ligne produit sans lot courant détectée à la ligne {row['row_index']}")
                 suspect_rows.append({
                     "row_index": row["row_index"],
+                    "code_lot": code_lot,
+                    "nom_lot": current_lot_name,
                     "raw_values": values,
                     "reason": "produit_without_current_lot"
                 })
@@ -238,6 +249,8 @@ def parse_rows(rows, header_index):
             if quantite is None and pu is None and total is None:
                 suspect_rows.append({
                     "row_index": row["row_index"],
+                    "code_lot": code_lot,
+                    "nom_lot": current_lot_name,
                     "raw_values": values,
                     "reason": "produit_missing_numeric_values"
                 })
@@ -248,6 +261,8 @@ def parse_rows(rows, header_index):
                 else:
                     suspect_rows.append({
                         "row_index": row["row_index"],
+                        "code_lot": code_lot,
+                        "nom_lot": current_lot_name,
                         "raw_values": values,
                         "reason": "produit_total_missing_and_cannot_recalculate"
                     })
@@ -257,6 +272,7 @@ def parse_rows(rows, header_index):
                 "code": code,
                 "type_ligne": "produit",
                 "code_lot": code_lot,
+                "nom_lot": current_lot_name,
                 "designation": designation,
                 "unite": unite or None,
                 "quantite": quantite,
@@ -328,15 +344,30 @@ def build_structured_errors(lots, suspect_rows):
     if not lots:
         errors.append({
             "type": "no_lot_detected",
+            "code_lot": None,
+            "nom_lot": None,
+            "row_index": None,
             "message": "Aucun lot exploitable détecté"
         })
 
     for s in suspect_rows:
         if s["reason"] == "code_absent_with_quantity":
+            code_lot = s.get("code_lot")
+            nom_lot = s.get("nom_lot")
+
+            if code_lot:
+                message = f"Une ligne contient une quantité sans code produit dans le lot {code_lot}"
+                if nom_lot:
+                    message += f" - {nom_lot}"
+            else:
+                message = "Une ligne contient une quantité sans code produit hors lot identifiable"
+
             errors.append({
                 "type": "code_absent_with_quantity",
+                "code_lot": code_lot,
+                "nom_lot": nom_lot,
                 "row_index": s["row_index"],
-                "message": "Une ligne contient une quantité sans code produit"
+                "message": message
             })
 
     # Déduplication simple
@@ -344,7 +375,13 @@ def build_structured_errors(lots, suspect_rows):
     seen = set()
 
     for err in errors:
-        key = (err.get("type"), err.get("row_index"), err.get("message"))
+        key = (
+            err.get("type"),
+            err.get("code_lot"),
+            err.get("nom_lot"),
+            err.get("row_index"),
+            err.get("message")
+        )
         if key not in seen:
             seen.add(key)
             unique_errors.append(err)
@@ -364,6 +401,9 @@ def parse_ods_from_url(
             "errors": [
                 {
                     "type": "missing_file_url",
+                    "code_lot": None,
+                    "nom_lot": None,
+                    "row_index": None,
                     "message": "file_url manquant"
                 }
             ],
@@ -418,6 +458,9 @@ def parse_ods_from_url(
             "errors": [
                 {
                     "type": "parser_exception",
+                    "code_lot": None,
+                    "nom_lot": None,
+                    "row_index": None,
                     "message": str(e)
                 }
             ],
