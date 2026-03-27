@@ -433,6 +433,7 @@ def parse_ods_from_url(
         warnings = parse_warnings + aggregate_warnings
         errors = build_structured_errors(lots, suspect_rows)
 
+        filtered_rows = [row for row in parsed_rows if row.get("quantite") is not None]
         return {
             "status": "success" if not errors else "error",
             "file_name": os.path.basename(file_url),
@@ -443,7 +444,7 @@ def parse_ods_from_url(
             "errors": errors,
             "warnings": warnings,
             "suspect_rows": suspect_rows,
-            "rows": parsed_rows,
+            "rows": filtered_rows,
             "lots": lots
         }
 
